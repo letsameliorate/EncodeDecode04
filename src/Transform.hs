@@ -5,10 +5,11 @@ import Context
 import LTS
 import Exception
 import Data.List
+import Data.Foldable (foldrM)
 import Data.Maybe (isJust)
 import Debug.Trace
 
-drive t m = drive' t EmptyCtx (free t) m []
+drive t = drive' t EmptyCtx (free t) [] []
 drive' (Free x) k fv m d = driveCtx (Node (Free x) []) k fv m d
 drive' (Bound i) k fv m d = error ("Unexpected bound variable")
 drive' t@(Lambda x t') EmptyCtx fv m d = let x' = rename fv x
@@ -56,3 +57,32 @@ driveCtx l (CaseCtx k bs) fv m d = Node (Case (root l) bs) (l:map (\(c,xs,t) -> 
                                                                                     l' = drive' u k fv' m d
                                                                                 in  foldl (\t x -> abstractLTS x t) l' xs') bs)
 
+instFuns l l' = instFuns' l l' []
+
+instFuns' l (Node (Lambda x _) [l']) fs = instFuns l l'
+instFuns' l (Node (Con _ _) ls) fs = concatMap (\l' -> instFuns l l') ls
+instFuns' l (Node (Case _ _) ls) fs = concatMap (\l' -> instFuns l l') ls
+instFuns' l (Node (Let _ _ _) ls) fs = concatMap (\l' -> instFuns l l') ls
+instFuns' l (Node (Apply _ _) ls) fs = concatMap (\l' -> instFuns l l') ls
+instFuns' l (Unfold _ _ l') fs = instFuns l l'
+instFuns' l (ConElim _ _ l') fs = instFuns l l'
+instFuns' l (Embedding _ l') fs = instFuns l l'
+instFuns' l1@(Function f l2) l1'@(Function f' l2') fs = case (chkInst l1 l1') of {Just s -> trace ("instFuns'\n" ++ (show s)) (f,f'):fs; Nothing -> fs}
+instFuns' l l' fs = fs
+
+chkInst (Function f l) (Function f' l') = trace ("chkInst " ++ (f ++ "," ++ f' ++ "\n") ++ (show (Function f l)) ++ "\n" ++ (show (Function f' l'))) chkInst' l l' [(f,f')] []
+--chkInst l l' = Nothing
+
+chkInst' (Node (Free x) []) (Node (Free x') []) ms ss = if x `elem` fst (unzip ss)
+                                                        then if (x,x') `elem` ss then Just ss else Nothing
+                                                        else Just ((x,x'):ss)
+chkInst' (Node (Free x) []) l ms ss | x `elem` (freeLTS l) = if x `elem` fst (unzip ss)
+                                                             then if (x,show (root l)) `elem` ss then Just ss else Nothing
+                                                             else Just ((x,show (root l)):ss)
+chkInst' (Node t ls) (Node t' ls') ms ss | match t t' = foldrM (\(l,l') ss -> trace ("chkInst' - node-node\n" ++ (show l) ++ "\n" ++ (show l')) chkInst' l l' ms ss) ss (zip ls ls')
+chkInst' (Unfold f _ l) (Unfold f' _ l') ms ss = trace "chkInst' - unfold" chkInst' l l' ((f,f'):ms) ss
+chkInst' (Function f l) (Function f' l') ms ss = if f `elem` fst (unzip ms)
+                                                 then if (f,f') `elem` ms then Just ((f,f'):ss) else Nothing
+                                                 else Nothing
+chkInst' (Embedding f l) (Embedding f' l') ms ss | (f,f') `elem` ms = Just ((f,f'):ss)
+chkInst' l l' ms ss = trace ("chkInst' - default\n" ++ (show l) ++ "\n" ++ (show  l')) Nothing
