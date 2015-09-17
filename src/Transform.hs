@@ -1,88 +1,164 @@
+-----------------------------------------------------------------------------
+--
+-- Module      :  Transform
+-- Copyright   :
+-- License     :  AllRightsReserved
+--
+-- Maintainer  :
+-- Stability   :
+-- Portability :
+--
+-- |
+--
+-----------------------------------------------------------------------------
+
 module Transform where
 
 import Term
-import Context
-import LTS
+--import LTS
 import Exception
 import Data.List
-import Data.Foldable (foldrM)
-import Data.Maybe (isJust)
+import Data.Maybe (isJust,isNothing)
 import Debug.Trace
 
-drive t = drive' t EmptyCtx (free t) [] []
-drive' (Free x) k fv m d = driveCtx (Node (Free x) []) k fv m d
-drive' (Bound i) k fv m d = error ("Unexpected bound variable")
-drive' t@(Lambda x t') EmptyCtx fv m d = let x' = rename fv x
-                                             l = drive' (subst (Free x') t') EmptyCtx (x':fv) m d
-                                         in  Node t [abstractLTS x' l]
-drive' (Lambda x t) (ApplyCtx k t') fv m d = drive' (subst t' t) k fv m d
-drive' (Lambda x t) (CaseCtx k bs) fv m d = error "Unapplied function in case selector"
-drive' t@(Con c ts) EmptyCtx fv m d = Node t (map (\t -> drive' t EmptyCtx fv m d) ts)
-drive' (Con c ts) (ApplyCtx k t) fv m d = error ("Constructor application is not saturated: "++show (Con c ts))
-drive' t@(Con c ts) k@(CaseCtx k' bs) fv m d = case (find (\(c',xs,t) -> c==c' && length xs == length ts) bs) of
-                                                  Nothing -> error ("No matching pattern in case for term:\n\n"++show (Case (Con c ts) bs))
-                                                  Just (c',xs,t) -> let u = place t k
-                                                                    in  ConElim c u (drive' (foldr (\t t' -> subst t t') t ts) k' fv m d)
-drive' (Apply t u) k fv m d = drive' t (ApplyCtx k u) fv m d
-drive' (Fun f) k fv m d = let t = place (Fun f) k
-                          in case (find (\(f',t') -> isJust (embed t' t)) m) of
-                                Just (f',_) -> case (lookup f d) of
-                                                  Nothing -> error ("Undefined function: "++f)
-                                                  Just t' -> let l = Unfold f t (drive' t' k fv [("f",t)] d)
-                                                             in  Embedding f' (if "f" `elem` (embeddings [] l) then Function "f" l else l)
-                                Nothing -> case (lookup f d) of
-                                              Nothing -> error ("Undefined function: "++f)
-                                              Just t' -> let f' = rename (fst (unzip m)) "f"
-                                                             l = Unfold f t (drive' t' k fv ((f',t):m) d)
-                                                         in if  f' `elem` (embeddings [] l) then Function f' l else l
-drive' (Case t bs) k fv m d = drive' t (CaseCtx k bs) fv m d
-drive' t@(Let x t' u) k fv m d = let x' = rename fv x
-                                     l = drive' t' EmptyCtx fv m d
-                                     l' = drive' (subst (Free x') u) k (x':fv) m d
-                                 in  Node t [l,abstractLTS x' l']
-drive' (Where t ds) k fv m d = drive' t k fv m (ds++d)
+super t k fv m d = super' t k fv m d
+super' (Free x) (CaseCtx k bs) fv m d = do
+                                        bs' <- mapM (\(c,xs,t) -> let t' = place t k
+                                                                      fv' = foldr (\x fv -> let x' = rename fv x in x':fv) fv xs
+                                                                      xs' = take (length xs) fv'
+                                                                      u = subst (Con c (map Free xs')) (abstract x (foldr (\x t -> subst (Free x) t) t' xs'))
+                                                                  in do
+                                                                     u' <- super u EmptyCtx fv' m d
+                                                                     return (c,xs,foldl (\t x -> abstract x t) u' xs')) bs
+                                        return (Case (Free x) bs')
+super' (Free x) k fv m d = superCtx (Free x) k fv m d
+super' (Binop b t u) k fv m d = super t (Leftop b k u) fv m d
+super' (Lambda x t) EmptyCtx fv m d = let x' = rename fv x
+                                      in do
+                                         t' <- super (subst (Free x') t) EmptyCtx (x':fv) m d
+                                         return (Lambda x (abstract x' t'))
+super' (Lambda x t) (ApplyCtx k (Lambda x' t')) fv m d = let f = rename (fst (unzip d)) "f"
+                                                         in  super (subst (Fun f) t) k fv m ((f,Lambda x' t'):d)
+super' (Lambda x t) (ApplyCtx k u) fv m d = super (subst u t) k fv m d
+super' (Lambda x t) (CaseCtx k bs) fv m d = error "Unapplied function in case selector"
+super' (Lambda x t) (Leftop b k u) fv m d = error "Unapplied function in basic function argument"
+super' (Con c ts) EmptyCtx fv m d = do
+                                    ts' <- mapM (\t -> super t EmptyCtx fv m d) ts
+                                    return (Con c ts')
+super' (Con c ts) (ApplyCtx k t) fv m d = error ("Constructor application is not saturated: "++show (place (Con c ts) k))
+super' (Con c ts) (CaseCtx k bs) fv m d = case (find (\(c',xs,t) -> c==c' && length xs == length ts) bs) of
+                                             Nothing -> error ("No matching pattern in case for term:\n\n"++show (Case (Con c ts) bs))
+                                             Just (c',xs,t) -> super (foldr (\t t' -> subst t t') t ts) k fv m d
+super' (Con c ts) (Leftop b k t) fv m d = error "Constructor in basic function argument"
+super' (Apply t u) k fv m d = super t (ApplyCtx k u) fv m d
+super' (Fun f) k fv m d = let t = place (Fun f) k
+                          in  case (find (\(Node n ts t') -> isJust (inst t' t)) m) of
+                                 Just (Node n ts t') -> let Just s = inst t' t
+                                                        in  return (instantiate s (Repeat n ts))
+                                 Nothing -> case (find (\(Node n ts t') -> isJust (embed t' t)) m) of
+                                               Just (Node n ts t') -> throw (n,t)
+                                               Nothing -> let (t',d') = unfold t d
+                                                              n = rename fv "f"
+                                                              xs = free t
+                                                              handler = \(n',t') -> if   n==n'
+                                                                                    then let (t'',s) = generalise t t'
+                                                                                         in  super (makeLet s t'') EmptyCtx fv m d
+                                                                                    else throw (n',t')
+                                                              u = do
+                                                                  u' <- super t' EmptyCtx (n:fv) ((Node n (map Free xs) t):m) d'
+                                                                  return (if n `elem` repeats u' then (Node n (map Free xs) u') else u')
+                                                          in handle u handler
+super' (Case t bs) k fv m d = super t (CaseCtx k bs) fv m d
+super' (Let x t u) k fv m d = let x' = rename fv x
+                              in do
+                                 t' <- super t EmptyCtx fv m d
+                                 u' <- super (subst (Free x') u) k (x':fv) m d
+                                 return (Let x t' (abstract x' u'))
+super' (Where t ds) k fv m d = super t k fv m (ds++d)
 
-driveCtx l EmptyCtx fv m d = l
-driveCtx l (ApplyCtx k t) fv m d = let l' = drive' t EmptyCtx fv m d
-                                   in  driveCtx (Node (Apply (root l) t) [l,l']) k fv m d
-driveCtx l@(Node (Free x) []) (CaseCtx k bs) fv m d = Node (Case (Free x) bs) (l:map (\(c,xs,t) -> let t' = place t k
-                                                                                                       fv' = foldr (\x fv -> let x' = rename fv x in x':fv) fv xs
-                                                                                                       xs' = take (length xs) fv'
-                                                                                                       u = foldr (\x t -> subst (Free x) t) (subst (Con c (map Free xs')) (abstract x t')) xs'
-                                                                                                       l' = drive' u EmptyCtx fv' m d
-                                                                                                   in  foldl (\t x -> abstractLTS x t) l' xs') bs)
-driveCtx l (CaseCtx k bs) fv m d = Node (Case (root l) bs) (l:map (\(c,xs,t) -> let fv' = foldr (\x fv -> let x' = rename fv x in x':fv) fv xs
-                                                                                    xs' = take (length xs) fv'
-                                                                                    u = foldr (\x t -> subst (Free x) t) t xs'
-                                                                                    l' = drive' u k fv' m d
-                                                                                in  foldl (\t x -> abstractLTS x t) l' xs') bs)
+superCtx t EmptyCtx fv m d = return t
+superCtx t (ApplyCtx k u) fv m d = do
+                                   u' <- super u EmptyCtx fv m d
+                                   superCtx (Apply t u') k fv m d
+superCtx t (CaseCtx k bs) fv m d = do
+                                   bs' <- mapM (\(c,xs,t) -> let fv' = foldr (\x fv -> let x' = rename fv x in x':fv) fv xs
+                                                                 xs' = take (length xs) fv'
+                                                             in do
+                                                                t' <- super (foldr (\x t -> subst (Free x) t) t xs') k fv' m d
+                                                                return (c,xs,foldl (\t x -> abstract x t) t' xs')) bs
+                                   return (Case t bs')
+superCtx t (Leftop b k u) fv m d = do
+                                   u' <- super u EmptyCtx fv m d
+                                   superCtx (Binop b t u') k fv m d
 
-instFuns l l' = instFuns' l l' []
+distill t k fv m d = distill' t k fv m d
+distill' (Free x) (CaseCtx k bs) fv m d = do
+                                          bs' <- mapM (\(c,xs,t) -> let t' = place t k
+                                                                        fv' = foldr (\x fv -> let x' = rename fv x in x':fv) fv xs
+                                                                        xs' = take (length xs) fv'
+                                                                        u = subst (Con c (map Free xs')) (abstract x (foldr (\x t -> subst (Free x) t) t' xs'))
+                                                                    in do
+                                                                       u' <- distill u EmptyCtx fv' m d
+                                                                       return (c,xs,foldl (\t x -> abstract x t) u' xs')) bs
+                                          return (Case (Free x) bs')
+distill' (Free x) k fv m d = distillCtx (Free x) k fv m d
+distill' (Binop b t u) k fv m d = distill t (Leftop b k u) fv m d
+distill' (Lambda x t) EmptyCtx fv m d = let x' = rename fv x
+                                        in do
+                                           t' <- distill (subst (Free x') t) EmptyCtx (x':fv) m d
+                                           return (Lambda x (abstract x' t'))
+distill' (Lambda x t) (ApplyCtx k (Lambda x' t')) fv m d = let f = rename (fst (unzip d)) "f"
+                                                           in  distill (subst (Fun f) t) k fv m ((f,Lambda x' t'):d)
+distill' (Lambda x t) (ApplyCtx k u) fv m d = distill (subst u t) k fv m d
+distill' (Lambda x t) (CaseCtx k bs) fv m d = error "Unapplied function in case selector"
+distill' (Lambda x t) (Leftop b k u) fv m d = error "Unapplied function in basic function argument"
+distill' (Con c ts) EmptyCtx fv m d = do
+                                      ts' <- mapM (\t -> distill t EmptyCtx fv m d) ts
+                                      return (Con c ts')
+distill' (Con c ts) (ApplyCtx k t) fv m d = error ("Constructor application is not saturated: "++show (place (Con c ts) k))
+distill' (Con c ts) (CaseCtx k bs) fv m d = case (find (\(c',xs,t) -> c==c' && length xs == length ts) bs) of
+                                               Nothing -> error ("No matching pattern in case for term:\n\n"++show (Case (Con c ts) bs))
+                                               Just (c',xs,t) -> distill (foldr (\t t' -> subst t t') t ts) k fv m d
+distill' (Con c ts) (Leftop b k t) fv m d = error "Constructor in basic function argument"
+distill' (Apply t u) k fv m d = distill t (ApplyCtx k u) fv m d
+distill' (Fun f) k fv m d = let t = returnval (super (Fun f) k fv [] d)
+                            in  trace (show t) (case (find (\(Node n ts t') -> isJust (inst t' t)) m) of
+                                   Just (Node n ts t') -> let Just s = inst t' t
+                                                          in  return (makeLet s (Repeat n ts))
+                                   Nothing -> case (find (\(Node n ts t') -> isJust (embed t' t)) m) of
+                                                 Just (Node n ts t') -> throw (n,t)
+                                                 Nothing -> let (t',d') = unfold (residualize t) []
+                                                                n = rename fv "f"
+                                                                xs = free t
+                                                                handler = \(n',t') -> if   n==n'
+                                                                                      then let (u,s) = generalise t t'
+                                                                                               s' = map (\(x,t) -> (x,residualize t)) s
+                                                                                               u' = residualize u
+                                                                                           in  distill (makeLet s' u') EmptyCtx fv m d
+                                                                                      else throw (n',t')
+                                                                u = do
+                                                                    u' <- distill t' EmptyCtx (n:fv) ((Node n (map Free xs) t):m) d'
+                                                                    return (if n `elem` repeats u' then Node n (map Free xs) u' else u')
+                                                            in handle u handler)
+distill' (Case t bs) k fv m d = distill t (CaseCtx k bs) fv m d
+distill' (Let x t u) k fv m d = let x' = rename fv x
+                                in do
+                                   t' <- distill t EmptyCtx fv m d
+                                   u' <- distill (subst (Free x') u) k (x':fv) m d
+                                   return (Let x t' (abstract x' u'))
+distill' (Where t ds) k fv m d = distill t k fv m (ds++d)
 
-instFuns' l (Node (Lambda x _) [l']) fs = instFuns l l'
-instFuns' l (Node (Con _ _) ls) fs = concatMap (\l' -> instFuns l l') ls
-instFuns' l (Node (Case _ _) ls) fs = concatMap (\l' -> instFuns l l') ls
-instFuns' l (Node (Let _ _ _) ls) fs = concatMap (\l' -> instFuns l l') ls
-instFuns' l (Node (Apply _ _) ls) fs = concatMap (\l' -> instFuns l l') ls
-instFuns' l (Unfold _ _ l') fs = instFuns l l'
-instFuns' l (ConElim _ _ l') fs = instFuns l l'
-instFuns' l (Embedding _ l') fs = instFuns l l'
-instFuns' l1@(Function f l2) l1'@(Function f' l2') fs = case (chkInst l1 l1') of {Just s -> trace ("instFuns'\n" ++ (show s)) (f,f'):fs; Nothing -> fs}
-instFuns' l l' fs = fs
-
-chkInst (Function f l) (Function f' l') = trace ("chkInst " ++ (f ++ "," ++ f' ++ "\n") ++ (show (Function f l)) ++ "\n" ++ (show (Function f' l'))) chkInst' l l' [(f,f')] []
---chkInst l l' = Nothing
-
-chkInst' (Node (Free x) []) (Node (Free x') []) ms ss = if x `elem` fst (unzip ss)
-                                                        then if (x,x') `elem` ss then Just ss else Nothing
-                                                        else Just ((x,x'):ss)
-chkInst' (Node (Free x) []) l ms ss | x `elem` (freeLTS l) = if x `elem` fst (unzip ss)
-                                                             then if (x,show (root l)) `elem` ss then Just ss else Nothing
-                                                             else Just ((x,show (root l)):ss)
-chkInst' (Node t ls) (Node t' ls') ms ss | match t t' = foldrM (\(l,l') ss -> trace ("chkInst' - node-node\n" ++ (show l) ++ "\n" ++ (show l')) chkInst' l l' ms ss) ss (zip ls ls')
-chkInst' (Unfold f _ l) (Unfold f' _ l') ms ss = trace "chkInst' - unfold" chkInst' l l' ((f,f'):ms) ss
-chkInst' (Function f l) (Function f' l') ms ss = if f `elem` fst (unzip ms)
-                                                 then if (f,f') `elem` ms then Just ((f,f'):ss) else Nothing
-                                                 else Nothing
-chkInst' (Embedding f l) (Embedding f' l') ms ss | (f,f') `elem` ms = Just ((f,f'):ss)
-chkInst' l l' ms ss = trace ("chkInst' - default\n" ++ (show l) ++ "\n" ++ (show  l')) Nothing
+distillCtx t EmptyCtx fv m d = return t
+distillCtx t (ApplyCtx k u) fv m d = do
+                                     u' <- distill u EmptyCtx fv m d
+                                     distillCtx (Apply t u') k fv m d
+distillCtx t (CaseCtx k bs) fv m d = do
+                                     bs' <- mapM (\(c,xs,t) -> let fv' = foldr (\x fv -> let x' = rename fv x in x':fv) fv xs
+                                                                   xs' = take (length xs) fv'
+                                                               in do
+                                                                  t' <- distill (foldr (\x t -> subst (Free x) t) t xs') k fv' m d
+                                                                  return (c,xs,foldl (\t x -> abstract x t) t' xs')) bs
+                                     return (Case t bs')
+distillCtx t (Leftop b k u) fv m d = do
+                                     u' <- distill u EmptyCtx fv m d
+                                     distillCtx (Binop b t u') k fv m d

@@ -1,4 +1,16 @@
-{- Term Language Definition, Parser and Pretty Printer -}
+-----------------------------------------------------------------------------
+--
+-- Module      :  Term
+-- Copyright   :
+-- License     :  AllRightsReserved
+--
+-- Maintainer  :
+-- Stability   :
+-- Portability :
+--
+-- |
+--
+-----------------------------------------------------------------------------
 
 module Term where
 
@@ -16,6 +28,7 @@ import Debug.Trace
 
 data Term = Free String
           | Bound Int
+          | Binop String Term Term
           | Lambda String Term
           | Con String [Term]
           | Apply Term Term
@@ -23,103 +36,150 @@ data Term = Free String
           | Case Term [(String,[String],Term)]
           | Let String Term Term
           | Where Term [(String,Term)]
+          | Node String [Term] Term
+          | Repeat String [Term]
 
 instance Show Term where
    show t = render (prettyTerm t)
 
 instance Eq Term where
-   (==) (Free x) (Free x') = x==x'
-   (==) (Bound i) (Bound i') = i==i'
-   (==) (Lambda x t) (Lambda x' t') = t==t'
-   (==) (Con c ts) (Con c' ts') = c==c' && ts==ts'
-   (==) (Apply t u) (Apply t' u') = t==t' && u==u'
-   (==) (Fun f) (Fun f') = f==f'
-   (==) u@(Case t bs) u'@(Case t' bs') | match u u' = t==t' && (all (\ ((c,xs,t),(c',xs',t')) -> t==t') (zip bs bs'))
-   (==) (Let x t u) (Let x' t' u') = t==t' && u==u'
-   (==) (Where t ds) (Where t' ds') = t==t' && ds==ds'
-   (==) t t' = False
+   (==) l l' = eqTerm [] l l'
 
-renaming (Free x) (Free x') r = if x `elem` fst (unzip r)
-                                then if (x,x') `elem` r then Just r else Nothing
-                                else Just ((x,x'):r)
-renaming u@(Bound _) u'@(Bound _) r | match u u' = Just r
-renaming (Lambda _ t) (Lambda _ t') r = renaming t t' r
-renaming u@(Con _ ts) u'@(Con _ ts') r | match u u' = foldrM (\(t,t') r -> renaming t t' r) r (zip ts ts')
-renaming (Apply t u) (Apply t' u') r = (renaming t t' r) >>= (renaming u u')
-renaming u@(Fun _) u'@(Fun _) r | match u u' = Just r
-renaming u@(Case t bs) u'@(Case t' bs') r | match u u' = (renaming t t' r) >>= (\r -> foldrM (\((_,_,t),(_,_,t')) r -> renaming t t' r) r (zip bs bs'))
-renaming (Let _ t u) (Let _ t' u') r = (renaming t t' r) >>= (renaming u u')
-renaming u@(Where t ds) u'@(Where t' ds') r | match u u' = renaming t t' r
-renaming t u r = Nothing
-{-
-coupling t u = (redex t == redex u) && (isJust (embedding t u []))
--}
-embed t u = couple t u []
+eqTerm ns (Free x) (Free x') = x==x'
+eqTerm ns (Bound i) (Bound i') = i==i'
+eqTerm ns (Binop b t u) (Binop b' t' u') | b==b' = (eqTerm ns t t') && (eqTerm ns u u')
+eqTerm ns (Lambda x t) (Lambda x' t') = eqTerm ns t t'
+eqTerm ns (Con c ts) (Con c' ts') | c==c' = all (\ (t,t') -> eqTerm ns t t') (zip ts ts')
+eqTerm ns (Apply t u) (Apply t' u') = (eqTerm ns t t') && (eqTerm ns u u')
+eqTerm ns (Fun f) (Fun f') = f==f'
+eqTerm ns u@(Case t bs) u'@(Case t' bs') | match u u' = (eqTerm ns t t') && (all (\ ((c,xs,t),(c',xs',t')) -> eqTerm ns t t') (zip bs bs'))
+eqTerm ns (Let x t u) (Let x' t' u') = (eqTerm ns t t') && (eqTerm ns u u')
+eqTerm ns u@(Where t ds) u'@(Where t' ds') | match u u' = eqTerm ns t t'
+eqTerm ns (Node n ts t) (Node n' ts' t') = eqTerm ((n,n'):ns) t t'
+eqTerm ns (Repeat n ts) (Repeat n' ts') = (n,n') `elem` ns
+eqTerm ns t t' = False
 
-embedding t u s = mplus (couple t u s) (dive t u s)
+data Context = EmptyCtx
+             | Leftop String Context Term
+             | Rightop String Term Context
+             | ApplyCtx Context Term
+             | CaseCtx Context [(String,[String],Term)] deriving Show
 
-couple (Free x) (Free x') s = if x `elem` fst (unzip s)
-                              then if (x,x') `elem` s then Just s else Nothing
-                              else Just ((x,x'):s)
-couple (Bound i) (Bound i') s | i == i' = Just s
-couple (Lambda _ t) (Lambda _' t') s = embedding t t' s
-couple u@(Con c' ts) u'@(Con c'' ts') s | match u u' = foldrM (\ (t,t') s -> embedding t t' s) s (zip ts ts')
-couple (Apply t u) (Apply t' u') s | match t t' = (embedding t t' s) >>= (embedding u u')
-couple (Fun f) (Fun f') s | f==f' = Just s
-couple u@(Case t bs) u'@(Case t' bs') s | match u u' = (embedding t t' s) >>= (\s->foldrM (\ ((_,_,t),(_,_,t')) s -> embedding t t' s) s (zip bs bs'))
-couple (Let _ t u) (Let _ t' u') s = (embedding t t' s) >>= (embedding u u')
-couple (Where t ds') (Where t' ds'') s = let (vs,ts) = unzip ds'
-                                             (vs',ts') = unzip ds''
-                                         in (embedding t t' s) >>= (\s -> foldrM (\(t,t') s -> embedding t t' s) s (zip ts ts'))
+place t EmptyCtx = t
+place t (Leftop b con u) = place (Binop b t u) con
+place t (Rightop b u con) = place (Binop b u t) con
+place t (ApplyCtx con u) = place (Apply t u) con
+place t (CaseCtx con bs) = place (Case t bs) con
 
-couple t u s = Nothing
+renaming t t' = renaming' [] t t' []
 
-dive t (Lambda x t') s = embedding t t' s
-dive t (Con c ts) s = msum (map (\t' -> embedding t t' s) ts)
-dive t (Apply t' u) s = mplus (embedding t t' s) (embedding t u s)
-dive t (Case t' bs) s = mplus (embedding t t' s) (msum (map (\(_,vs,t') -> embedding t (shift (length vs) 0 t') s) bs))
-dive t (Let x t' u) s = mplus (embedding t t' s) (embedding t u s)
-dive t (Where t' ds') s = embedding t t' s
-dive t u s = Nothing
+renaming' ns (Free x) (Free x') r = if x `elem` fst (unzip r)
+                                    then if (x,x') `elem` r then Just r else Nothing
+                                    else Just ((x,x'):r)
+renaming' ns (Bound i) (Bound i') r | i==i' = Just r
+renaming' ns (Binop b t u) (Binop b' t' u') r | b==b' = (renaming' ns t t' r) >>= (renaming' ns u u')
+renaming' ns (Lambda _ t) (Lambda _ t') r = renaming' ns t t' r
+renaming' ns (Con c ts) (Con c' ts') r | c==c' = foldrM (\(t,t') r -> renaming' ns t t' r) r (zip ts ts')
+renaming' ns (Apply t u) (Apply t' u') r = (renaming' ns t t' r) >>= (renaming' ns u u')
+renaming' ns (Fun f) (Fun f') r | f==f' = Just r
+renaming' ns u@(Case t bs) u'@(Case t' bs') r | match u u' = (renaming' ns t t' r) >>= (\r -> foldrM (\((_,_,t),(_,_,t')) r -> renaming' ns t t' r) r (zip bs bs'))
+renaming' ns (Let _ t u) (Let _ t' u') r = (renaming' ns t t' r) >>= (renaming' ns u u')
+renaming' ns u@(Where t ds) u'@(Where t' ds') r | match u u' = renaming' ns t t' r
+renaming' ns (Node n ts t) (Node n' ts' t') r = renaming' ((n,n'):ns) t t' r
+renaming' ns (Repeat n ts) (Repeat n' ts') r | (n,n') `elem` ns = Just r
+renaming' ns t t' r = Nothing
 
-generalise t t' = let (t'',s) = generalise' t t' (free t) []
-                  in  makeLet s t''
+inst t t' = inst' [] t t' []
 
-generalise' u@(Free x) u'@(Free x') fv s | match u u' = (u,s)
-generalise' u@(Bound _) u'@(Bound _) fv s | match u u' = (u,s)
-generalise' (Lambda x t) (Lambda x' t') fv s = let x'' = rename (fv++fst(unzip s)) x
-                                                   (t'',s') = generalise' (subst (Free x'') t) (subst (Free x'') t') (x'':fv) s
-                                               in  (Lambda x (abstract x'' t''),s')
-generalise' u@(Con c ts) u'@(Con c' ts') fv s | match u u' = let (ts'',s') = foldr (\(t,t') (ts'',s) -> let (t'',s') = generalise' t t' fv s
-                                                                                                        in  (t'':ts'',s')) ([],s) (zip ts ts')
-                                                             in  (Con c ts'',s')
-generalise' (Apply t u) (Apply t' u') fv s = let (t'',s') = generalise' t t' fv s
-                                                 (u'',s'') = generalise' u u' fv s'
-                                             in  (Apply t'' u'',s'')
-generalise' u@(Fun f) u'@(Fun f') fv s | match u u' = (u,s)
-generalise' u@(Case t bs) u'@(Case t' bs') fv s | match u u' = let (t'',s') = generalise' t t' fv s
-                                                                   (bs'',s'') = foldr (\ ((c,xs,t),(c',xs',t')) (bs'',s) -> let fv' = foldr (\x fv -> let x' = rename fv x in x':fv) (fv++fst(unzip s)) xs
-                                                                                                                                xs'' = take (length xs) fv'
-                                                                                                                                (t'',s') = generalise' (foldr (\x t -> subst (Free x) t) t xs'') (foldr (\x t -> subst (Free x) t) t' xs'') (xs''++fv') s
-                                                                                                                            in  ((c,xs,foldl (\t x -> abstract x t) t'' xs''):bs'',s')) ([],s') (zip bs bs')
-                                                               in  (Case t'' bs'',s'')
-generalise' (Let x t u) (Let x' t' u') fv s = let x'' = rename (fv++fst(unzip s)) x
-                                                  (t'',s') = generalise' t t' fv s
-                                                  (u'',s'') = generalise' (subst (Free x'') u) (subst (Free x'') u') (x'':fv) s'
-                                              in  (Let x t'' (abstract x'' u''),s'')
-generalise' (Where t ds) (Where t' ds') fv s = let (t'',s') = generalise' t t' fv s
-                                                   (ds'',s'') = foldr (\ ((x,t),(x',t')) (ds,s) -> let (t'',s') = generalise' t t' fv s
-                                                                                                   in  ((x,t''):ds,s')) ([],s') (zip ds ds')
-                                               in  (Where t'' ds'',s'')
-generalise' t t' fv s = case (find (\(x,u) -> t==u) s) of
-                                     Just (x,u) -> (Free x,s)
-                                     Nothing -> let x = rename (fv++fst(unzip s)) "x"
-                                                in  (Free x,(x,t):s)
+inst' ns (Free x) t s = if x `elem` fst (unzip s)
+                        then if (x,t) `elem` s then Just s else Nothing
+                        else Just ((x,t):s)
+inst' ns (Bound i) (Bound i') s | i==i' = Just s
+inst' ns (Binop b t u) (Binop b' t' u') s | b==b' = (inst' ns t t' s) >>= (inst' ns u u')
+inst' ns (Lambda _ t) (Lambda _ t') s = inst' ns t t' s
+inst' ns (Con c ts) (Con c' ts') s | c==c' = foldrM (\(t,t') s -> inst' ns t t' s) s (zip ts ts')
+inst' ns (Apply t u) (Apply t' u') s = (inst' ns t t' s) >>= (inst' ns u u')
+inst' ns (Apply t u) t' s = msum (map (\u' -> (inst' ns u u' s) >>= (inst' ns t (Lambda "x" (abstractTerm 0 u' t')))) (subterms t'))
+inst' ns (Fun f) (Fun f') s | f==f' = Just s
+inst' ns u@(Case t bs) u'@(Case t' bs') s | match u u' = (inst' ns t t' s) >>= (\s -> foldrM (\((_,_,t),(_,_,t')) s -> inst' ns t t' s) s (zip bs bs'))
+inst' ns (Let _ t u) (Let _ t' u') s = (inst' ns t t' s) >>= (inst' ns u u')
+inst' ns u@(Where t ds) u'@(Where t' ds') s | match u u' = inst' ns t t' s
+inst' ns (Node n ts t) (Node n' ts' t') s = inst' ((n,n'):ns) t t' s
+inst' ns (Repeat n ts) (Repeat n' ts') s | (n,n') `elem` ns = Just s
+inst' ns t t' s = Nothing
+
+embed t u = couple [] t u []
+
+embedding ns t u r = mplus (couple ns t u r) (dive ns t u r)
+
+couple ns (Free x) (Free x') r = if x `elem` fst (unzip r)
+                                 then if (x,x') `elem` r then Just r else Nothing
+                                 else Just ((x,x'):r)
+couple ns (Bound i) (Bound i') r | i == i' = Just r
+couple ns (Binop b t u) (Binop b' t' u') r | b==b' = (embedding ns t t' r) >>= (embedding ns u u')
+couple ns (Lambda _ t) (Lambda _' t') r = embedding ns t t' r
+couple ns (Con c ts) (Con c' ts') r | c==c' = foldrM (\ (t,t') r -> embedding ns t t' r) r (zip ts ts')
+couple ns (Apply t u) (Apply t' u') r = (embedding ns t t' r) >>= (embedding ns u u')
+couple ns (Fun f) (Fun f') r | f==f' = Just r
+couple ns u@(Case t bs) u'@(Case t' bs') r | match u u' = (embedding ns t t' r) >>= (\r->foldrM (\ ((_,_,t),(_,_,t')) r -> embedding ns t t' r) r (zip bs bs'))
+couple ns (Let _ t u) (Let _ t' u') r = (embedding ns t t' r) >>= (embedding ns u u')
+couple ns u@(Where t ds) u'@(Where t' ds') r | match u u' = couple ns t t' r
+couple ns (Node n ts t) (Node n' ts' t') r = embedding ((n,n'):ns) t t' r
+couple ns (Repeat n ts) (Repeat n' ts') r | (n,n') `elem` ns = Just r
+couple ns t t' r = Nothing
+
+dive ns t (Binop b t' u) r = mplus (embedding ns t t' r) (embedding ns t u r)
+dive ns t (Lambda x t') r = embedding ns (shift 1 0 t) t' r
+dive ns t (Con c ts) r = msum (map (\t' -> embedding ns t t' r) ts)
+dive ns t (Apply t' u) r = mplus (embedding ns t t' r) (embedding ns t u r)
+dive ns t (Case t' bs) r = mplus (embedding ns t t' r) (msum (map (\(_,xs,t') -> embedding ns (shift (length xs) 0 t) t' r) bs))
+dive ns t (Let x t' u) r = mplus (embedding ns t t' r) (embedding ns (shift 1 0 t) u r)
+dive ns t (Where t' ds') r = embedding ns t t' r
+dive ns t (Node n ts t') r = embedding ns t t' r
+dive ns t t' r = Nothing
+
+generalise t t' = generalise' [] t t' (free t) [] [] []
+
+generalise' ns (Free x) (Free x') fv bv ls s = (Free x,s)
+generalise' ns (Bound i) (Bound i') fv bv ls s | i==i' = (Bound i,s)
+generalise' ns (Binop b t u) (Binop b' t' u') fv bv ls s | b==b' = let (t'',s') = generalise' ns t t' fv bv ls s
+                                                                       (u'',s'') = generalise' ns u u' fv bv ls s'
+                                                                   in  (Binop b t'' u'',s'')
+generalise' ns (Lambda x t) (Lambda x' t') fv bv ls s = let x'' = rename (fv++bv++fst(unzip s)) x
+                                                            (t'',s') = generalise' ns (subst (Free x'') t) (subst (Free x'') t') fv (x'':bv) ls s
+                                                        in  (Lambda x (abstract x'' t''),s')
+generalise' ns u@(Con c ts) u'@(Con c' ts') fv bv ls s | match u u' = let (ts'',s') = foldr (\(t,t') (ts'',s) -> let (t'',s') = generalise' ns t t' fv bv ls s
+                                                                                                                 in  (t'':ts'',s')) ([],s) (zip ts ts')
+                                                                      in  (Con c ts'',s')
+generalise' ns (Apply t u) (Apply t' u') fv bv ls s = let (t'',s') = generalise' ns t t' fv bv ls s
+                                                          (u'',s'') = generalise' ns u u' fv bv ls s'
+                                                      in  (Apply t'' u'',s'')
+generalise' ns (Fun f) (Fun f') fv bv ls s | f==f' = (Fun f,s)
+generalise' ns u@(Case t bs) u'@(Case t' bs') fv bv ls s | match u u' = let (t'',s') = generalise' ns t t' fv bv ls s
+                                                                            (bs'',s'') = foldr (\ ((c,xs,t),(c',xs',t')) (bs'',s) -> let bv' = foldr (\x bv -> let x' = rename bv x in x':bv) (fv++bv++fst(unzip s)) xs
+                                                                                                                                         xs'' = take (length xs) bv'
+                                                                                                                                         (t'',s') = generalise' ns (foldr (\x t -> subst (Free x) t) t xs'') (foldr (\x t -> subst (Free x) t) t' xs'') fv (xs''++bv) ls s
+                                                                                                                                     in  ((c,xs,foldl (\t x -> abstract x t) t'' xs''):bs'',s')) ([],s') (zip bs bs')
+                                                                        in  (Case t'' bs'',s'')
+generalise' ns (Let x t u) (Let x' t' u') fv bv ls s = let x'' = rename (fv++bv++fst(unzip s)) x
+                                                           (t'',s') = generalise' ns t t' fv bv ls s
+                                                           (u'',s'') = generalise' ns (subst (Free x'') u) (subst (Free x'') u') (x'':fv) bv ((x'',t''):ls) s'
+                                                       in  (Let x t'' (abstract x'' u''),s'')
+generalise' ns u@(Where t ds) u'@(Where t' ds') fv bv ls s | match u u' = let (t'',s') = generalise' ns t t' fv bv ls s
+                                                                          in  (Where t'' ds,s')
+generalise' ns (Node n ts t) (Node n' ts' t') fv bv ls s = let (t'',s') = generalise' ((n,n'):ns) t t' fv bv ls s
+                                                           in  (Node n ts t'',s')
+generalise' ns (Repeat n ts) (Repeat n' ts') fv bv ls s | (n,n') `elem` ns = (Repeat n ts,s)
+generalise' ns t t' fv bv ls s = let xs = intersect bv (free t)
+                                     t'' = instantiate ls (foldl (\t x -> Lambda x (abstract x t)) t xs)
+                                     x = rename (fv++bv++fst(unzip s)) "x"
+                                 in (foldr (\x t -> Apply t (Free x)) (Free x) xs,(x,t''):s)
 
 makeLet s t = foldr (\(x,t) u -> Let x t (abstract x u)) t s
 
 match (Free x) (Free x') = x==x'
 match (Bound i) (Bound i') = i==i'
+match (Binop b t u) (Binop b' t' u') = b==b'
 match (Lambda x t) (Lambda x' t') = True
 match (Con c ts) (Con c' ts') = c==c' && length ts == length ts'
 match (Apply t u) (Apply t' u') = True
@@ -127,16 +187,30 @@ match (Fun f) (Fun f') = f==f'
 match (Case t bs) (Case t' bs') = (length bs == length bs') && (all (\((c,xs,t),(c',xs',t')) -> c == c' && length xs == length xs') (zip bs bs'))
 match (Let x t u) (Let x' t' u') = True
 match (Where t ds) (Where t' ds') = ds == ds'
+match (Node n ts t) (Node n' ts' t') = True
+match (Repeat n ts) (Repeat n' ts') = True
 match t t' = False
 
-redex (Apply t u) = redex t
-redex (Case t bs) = redex t
-redex t = t
+subterms t = t:subterms' t
+
+subterms' (Free x) = []
+subterms' (Bound i) = []
+subterms' (Binop b t u) = subterms t ++ subterms u
+subterms' (Lambda x t) = subterms (shift (-1) 0 t)
+subterms' (Con c ts) = concat (map subterms ts)
+subterms' (Apply t u) = subterms t ++ subterms u
+subterms' (Fun f) = []
+subterms' (Case t bs) = subterms t ++ concat (map (\(c,xs,t) -> subterms (shift (-(length xs)) 0 t)) bs)
+subterms' (Let x t u) = subterms t ++ subterms (shift (-1) 0 u)
+subterms' (Where t ds) = subterms t ++ concat (map (\(f,t) -> subterms t) ds)
+subterms' (Node n ts t) = subterms t ++ concat (map subterms ts)
+subterms' (Repeat n ts) = concat (map subterms ts)
 
 free t = free' [] t
 
 free' xs (Free x) = if (x `elem` xs) then xs else x:xs
 free' xs (Bound i) = xs
+free' xs (Binop b t u) = free' (free' xs t) u
 free' xs (Lambda x t) = free' xs t
 free' xs (Con c ts) = foldr (\t xs -> free' xs t) xs ts
 free' xs (Apply t u) = free' (free' xs t) u
@@ -144,35 +218,27 @@ free' xs (Fun f) = xs
 free' xs (Case t bs) = foldr (\(c,xs,t) xs' -> free' xs' t) (free' xs t) bs
 free' xs (Let x t u) = free' (free' xs t) u
 free' xs (Where t ds) = foldr (\(x,t) xs -> free' xs t) (free' xs t) ds
+free' xs (Node n ts t) = free' xs t
+free' xs (Repeat n ts) = foldr (\t xs -> free' xs t) xs ts
 
-bound t = bound' 0 [] t
-
-bound' d bs (Free x) = bs
-bound' d bs (Bound i) = let b = i-d
-                        in if (b<0) || (b `elem` bs) then bs else b:bs
-bound' d bs (Lambda x t) = bound' (d+1) bs t
-bound' d bs (Con c ts) = foldr (\t bs -> bound' d bs t) bs ts
-bound' d bs (Apply t u) = bound' d (bound' d bs u) t
-bound' d bs (Fun f) = bs
-bound' d bs (Case t bs') = foldr (\(c,xs,t) bs -> bound' (d+length xs) bs t) (bound' d bs t) bs'
-bound' d bs (Let x t u) = bound' (d+1) (bound' d bs t) u
-bound' d bs (Where t ds) = foldr (\(x,t) bs -> bound' d bs t) (bound' d bs t) ds
-
-funs t = funs' [] t
-
-funs' fs (Free x) = fs
-funs' fs (Bound i) = fs
-funs' fs (Lambda x t) = funs' fs t
-funs' fs (Con c ts) = foldr (\t fs -> funs' fs t) fs ts
-funs' fs (Fun f) = f:fs
-funs' fs (Apply t u) = funs' (funs' fs t)  u
-funs' fs (Case t bs) = foldr (\(c,xs,t) fs -> funs' fs t) (funs' fs t) bs
-funs' fs (Let x t u) = funs' (funs' fs t) u
-funs' fs (Where t ds) = foldr (\(x,t) fs -> funs' fs t) (funs' fs t) ds
+repeats t = repeats' [] t
+repeats' ns (Free x) = ns
+repeats' ns (Bound i) = ns
+repeats' ns (Binop b t u) = repeats' (repeats' ns t) u
+repeats' ns (Lambda x t) = repeats' ns t
+repeats' ns (Con c ts) = foldr (\t ns -> repeats' ns t) ns ts
+repeats' ns (Apply t u) = repeats' (repeats' ns t) u
+repeats' ns (Fun f) = ns
+repeats' ns (Case t bs) = foldr (\(c,xs,t) ns -> repeats' ns t) (repeats' ns t) bs
+repeats' ns (Let x t u) = repeats' (repeats' ns t) u
+repeats' ns (Where t ds) = repeats' ns t
+repeats' ns (Node n ts t) = repeats' ns t
+repeats' ns (Repeat n ts) = n:ns
 
 shift 0 d u = u
 shift i d (Free x) = Free x
-shift i d (Bound j) = if j >= d then Bound (j+i) else Bound j
+shift i d (Bound i') = if i' >= d then Bound (i'+i) else Bound i'
+shift i d (Binop b t u) = Binop b (shift i d t) (shift i d u)
 shift i d (Lambda x t) = Lambda x (shift i (d+1) t)
 shift i d (Con c ts) = Con c (map (shift i d) ts)
 shift i d (Apply t u) = Apply (shift i d t) (shift i d u)
@@ -180,6 +246,8 @@ shift i d (Fun f) = Fun f
 shift i d (Case t bs) = Case (shift i d t) (map (\(c,xs,t) -> (c,xs,shift i (d+length xs) t)) bs)
 shift i d (Let x t u) = Let x (shift i d t) (shift i (d+1) u)
 shift i d (Where t ds) = Where (shift i d t) (map (\(x,t) -> (x,shift i d t)) ds)
+shift i d (Node n ts t) = Node n (map (shift i d) ts) (shift i d t)
+shift i d (Repeat n ts) = Repeat n (map (shift i d) ts)
 
 subst t u = subst' 0 t u
 
@@ -189,6 +257,7 @@ subst' i t (Bound i') = if   i'<i
                         else if   i'==i
                              then shift i 0 t
                              else Bound (i'-1)
+subst' i t (Binop b t' u) = Binop b (subst' i t t') (subst' i t u)
 subst' i t (Lambda x t') = Lambda x (subst' (i+1) t t')
 subst' i t (Con c ts) = Con c (map (subst' i t) ts)
 subst' i t (Apply t' u) = Apply (subst' i t t') (subst' i t u)
@@ -196,6 +265,10 @@ subst' i t (Fun f) = Fun f
 subst' i t (Case t' bs) = Case (subst' i t t') (map (\(c,xs,u) -> (c,xs,subst' (i+length xs) t u)) bs)
 subst' i t (Let x t' u) = Let x (subst' i t t') (subst' (i+1) t u)
 subst' i t (Where t' ds) = Where (subst' i t t') (map (\(x,u) -> (x,subst' i t u)) ds)
+subst' i t (Node n ts t') = Node n (map (subst' i t) ts) (subst' i t t')
+subst' i t (Repeat n ts) = Repeat n (map (subst' i t) ts)
+
+substList ts t = foldr (\t u -> subst t u) t ts
 
 instantiate s t = instantiate' 0 s t
 
@@ -210,11 +283,14 @@ instantiate' d s (Fun f) = Fun f
 instantiate' d s (Case t bs) = Case (instantiate' d s t) (map (\(c,xs,t) -> (c,xs,instantiate' (d+length xs) s t)) bs)
 instantiate' d s (Let x t u) = Let x (instantiate' d s t) (instantiate' (d+1) s u)
 instantiate' d s (Where t ds) = Where (instantiate' d s t) (map (\(x,t) -> (x,instantiate' d s t)) ds)
+instantiate' d s (Node n ts t) = Node n (map (instantiate' d s) ts) (instantiate' d s t)
+instantiate' d s (Repeat n ts) = Repeat n (map (instantiate' d s) ts)
 
 abstract x t = abstract' 0 x t
 
 abstract' i x (Free x') = if x==x' then Bound i else Free x'
 abstract' i x (Bound i') = if i'>=i then Bound (i'+1) else Bound i'
+abstract' i x (Binop b t u) = Binop b (abstract' i x t) (abstract' i x u)
 abstract' i x (Lambda x' t) = Lambda x' (abstract' (i+1) x t)
 abstract' i x (Con c ts) = Con c (map (abstract' i x) ts)
 abstract' i x (Apply t u) = Apply (abstract' i x t) (abstract' i x u)
@@ -222,10 +298,68 @@ abstract' i x (Fun f) = Fun f
 abstract' i x (Case t bs) = Case (abstract' i x t) (map (\(c,xs,t) -> (c,xs,abstract' (i + length xs) x t)) bs)
 abstract' i x (Let x' t u) = Let x' (abstract' i x t) (abstract' (i+1) x u)
 abstract' i x (Where t ds) = Where (abstract' i x t) (map (\(x',t) -> (x',abstract' i x t)) ds)
+abstract' i x (Node n ts t) = Node n (map (abstract' i x) ts) (abstract' i x t)
+abstract' i x (Repeat n ts) = Repeat n (map (abstract' i x) ts)
+
+abstractList xs t = foldl (\t x -> abstract x t) t xs
+
+abstractTerm i t u = if t==u then Bound i else abstractTerm' i t u
+abstractTerm' i t (Free x) = Free x
+abstractTerm' i t (Bound i') = Bound (if i'>=i then i'+1 else i')
+abstractTerm' i t (Binop b t' u) = Binop b (abstractTerm i t t') (abstractTerm i t u)
+abstractTerm' i t (Lambda x t') = Lambda x (abstractTerm (i+1) (shift 1 0 t) t')
+abstractTerm' i t (Con c ts) = Con c (map (abstractTerm i t) ts)
+abstractTerm' i t (Case t' bs) = Case (abstractTerm i t t') (map (\(c,xs,t') -> (c,xs,abstractTerm (i + length xs) (shift (length xs) 0 t) t')) bs)
+abstractTerm' i t (Let x t' u) = Let x (abstractTerm i t t') (abstractTerm (i+1) (shift 1 0 t) u)
+abstractTerm' i t (Where t' ds) = Where (abstractTerm i t t') (map (\(f,t') -> (f,abstractTerm i t t')) ds)
+abstractTerm' i t (Node n ts t') = Node n (map (abstractTerm i t) ts) (abstractTerm i t t')
+abstractTerm' i t (Repeat n ts) = Repeat n (map (abstractTerm i t) ts)
+
+residualize t = residualize' t (free t)
+
+residualize' (Free x) fv = Free x
+residualize' (Binop b t u) fv = let t' = residualize' t fv
+                                    u' = residualize' u fv
+                                in  Binop b t' u'
+residualize' (Lambda x t) fv = let x' = rename fv x
+                                   t' = residualize' (subst (Free x') t) (x':fv)
+                               in  Lambda x (abstract x' t')
+residualize' (Con c ts) fv = Con c (map (\t -> residualize' t fv) ts)
+residualize' (Apply t u) fv = let t' = residualize' t fv
+                                  u' = residualize' u fv
+                              in  Apply t' u'
+residualize' (Case t bs) fv = let t' = residualize' t fv
+                                  bs' = map (\(c,xs,t) -> let fv' = foldr (\x fv -> let x' = rename fv x in x':fv) fv xs
+                                                              xs' = take (length xs) fv'
+                                                              t' = residualize' (foldr (\x t -> subst (Free x) t) t xs') fv'
+                                                          in  (c,xs,foldl (\t x -> abstract x t) t' xs')) bs
+                              in  Case t' bs'
+residualize' (Let x t u) fv = let x' = rename fv x
+                                  t' = residualize' t fv
+                                  u' = residualize' (subst (Free x') u) (x':fv)
+                              in  subst t' (abstract x' u')
+residualize' (Node n ts t) fv = let t' = foldr (\u t -> Apply t u) (Fun n) ts
+                                    u = residualize' t fv
+                                in  Where t' [(n,foldl (\t x -> Lambda x (abstract x t)) u (map (\(Free x) -> x) ts))]
+residualize' (Repeat n ts) fv = foldr (\u t -> Apply t u) (Fun n) ts
+
+unfold t d = unfold' t EmptyCtx d
+
+unfold' (Fun f) k d = case (lookup f d) of
+                         Nothing -> error ("Undefined function: "++f)
+                         Just t' -> (place t' k,d)
+unfold' (Binop b t u) k d = unfold' t (Leftop b k u) d
+unfold' (Apply t u) k d = unfold' t (ApplyCtx k u) d
+unfold' (Case t bs) k d = unfold' t (CaseCtx k bs) d
+unfold' (Where t ds) k d = unfold' t k (ds++d)
+unfold' t k d = (place t k,d)
 
 rename fv x = if   x `elem` fv
               then rename fv (x++"'")
               else x
+
+renameList fv = let x = rename fv "x"
+                in  x:(renameList (x:fv))
 
 stripLambda (Lambda x t) = let x' = rename (free t) x
                                (xs,u) = stripLambda (subst (Free x') t)
@@ -236,6 +370,7 @@ blank = Text.PrettyPrint.HughesPJ.space
 
 prettyTerm (Free x) = text x
 prettyTerm (Bound i) = (text "#") <> (int i)
+prettyTerm (Binop b t u) = (prettyAtom t) <+> (text b) <+> (prettyAtom u)
 prettyTerm t@(Lambda _ _) = let (xs,t') = stripLambda t
                             in  (text "\\") <> (hsep (map text xs)) <> (text ".") <> (prettyTerm t')
 prettyTerm t@(Con c ts) = if   isNat t
@@ -256,6 +391,8 @@ prettyTerm (Case t (b:bs)) = hang ((text "case") <+> (prettyAtom t) <+> (text "o
 prettyTerm (Let x t u) = let x' = rename (free u) x
                          in  ((text "let") <+> (text x') <+> (text "=") <+> (prettyTerm t)) $$ ((text "in") <+> (prettyTerm (subst (Free x') u)))
 prettyTerm (Where t ds) = (prettyTerm t) $$ (text "where") $$ (prettyEnv ds)
+prettyTerm (Node n ts t) = (text n) <+> (hsep (map prettyTerm ts)) <+> (text "=") <+> (prettyTerm t)
+prettyTerm (Repeat n ts ) = (text n) <+> (hsep (map prettyTerm ts))
 
 prettyApp (Apply t u) = (prettyApp t) <+> (prettyAtom u)
 prettyApp t = prettyAtom t
@@ -300,9 +437,9 @@ potDef = emptyDef
          , commentLine     = "--"
          , nestedComments  = True
          , identStart      = lower
-         , identLetter     = do alphaNum <|> oneOf "_'"
-         , reservedNames   = ["case","of","where","ALL","EX","ANY"]
-         , reservedOpNames = ["~","/\\","\\/","<=>","=>"]
+         , identLetter     = do letter <|> oneOf "_'"
+         , reservedNames   = ["case","of","where","let","in","ALL","EX","ANY"]
+         , reservedOpNames = ["~","/\\","\\/","<=>","=>","+","-","*","/"]
          , caseSensitive   = True
          }
 
@@ -319,7 +456,7 @@ natural    = T.natural lexer
 
 con = do
       c <- upper
-      cs <- many (do alphaNum <|> oneOf "_'")
+      cs <- many letter
       return (c:cs)
 
 makeWhere t [] = t
@@ -328,6 +465,7 @@ makeWhere t fs = let (fn,_) = unzip fs
 
 makeFuns fn (Free x) = if x `elem` fn then Fun x else Free x
 makeFuns fn (Bound i ) = Bound i
+makeFuns fn (Binop b t u) = Binop b (makeFuns fn t) (makeFuns fn u)
 makeFuns fn (Lambda x t) = Lambda x (makeFuns fn t)
 makeFuns fn (Con c ts) = Con c (map (makeFuns fn) ts)
 makeFuns fn (Apply t u) = Apply (makeFuns fn t) (makeFuns fn u)
@@ -372,9 +510,27 @@ prec = [ [ unop "~" (Fun "not")],
                                )
 
 term =     do
-           f <- atom
-           as <- many atom
-           return (foldl Apply f as)
+           a <- atom
+           e <-      do
+                     reservedOp "+"
+                     a' <- atom
+                     return (Binop "+" a a')
+                 <|> do
+                     reservedOp "-"
+                     a' <- atom
+                     return (Binop "-" a a')
+                 <|> do
+                     reservedOp "*"
+                     a' <- atom
+                     return (Binop "*" a a')
+                 <|> do
+                     reservedOp "/"
+                     a' <- atom
+                     return (Binop "/" a a')
+                 <|> do
+                     as <- many atom
+                     return (foldl Apply a as)
+           return e
        <|> do
            symbol "\\"
            xs <- many1 identifier
@@ -387,6 +543,14 @@ term =     do
            reserved "of"
            bs <- sepBy1 branch (symbol "|")
            return (Case e bs)
+       <|> do
+           reserved "let"
+           x <- identifier
+           symbol "="
+           e1 <- expr
+           reserved "in"
+           e2 <- expr
+           return (Let x e1 (abstract x e2))
 
 atom =     do
            x <- identifier
@@ -427,3 +591,5 @@ branch = do
 parseExpr input = parse expr "(ERROR)" input
 
 parseProg input = parse prog "(ERROR)" input
+
+

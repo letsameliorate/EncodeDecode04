@@ -1,3 +1,17 @@
+-----------------------------------------------------------------------------
+--
+-- Module      :  Exception
+-- Copyright   :
+-- License     :  AllRightsReserved
+--
+-- Maintainer  :
+-- Stability   :
+-- Portability :
+--
+-- |
+--
+-----------------------------------------------------------------------------
+
 module Exception where
 
 data Exception a b = Exn a | NoExn b deriving Show
@@ -14,3 +28,5 @@ handle x f = case x of
 
 throw :: a -> Exception a b
 throw x = Exn x
+
+returnval (NoExn a) = a
